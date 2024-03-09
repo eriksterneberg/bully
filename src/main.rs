@@ -1,11 +1,12 @@
 mod types;
 
-use std::fmt::format;
+use std::io;
+use std::io::Write;
 use std::thread::{sleep};
+use std::time::Duration;
 use clap::Parser;
 use crossbeam_channel::bounded;
 use tdigest::TDigest;
-use indicatif::{ProgressBar};
 use prettytable::{Table, Row, Cell};
 
 fn main() {
@@ -31,40 +32,53 @@ fn main() {
         // Sink
         let mut digest = TDigest::new_with_size(100);
 
-        let bar = ProgressBar::new(parameters.requests as u64);
+        let mut count = 0;
+
+        print!("Running");
 
         for msg in finished.iter() {
             digest = digest.merge_unsorted(vec![msg as f64]);
-            bar.inc(1);
+            count+=1;
+            if count % (parameters.requests / 10) == 0 {
+                io::stdout().flush().expect("");
+                print!(".");
+            }
         }
 
-        let median = digest.estimate_quantile(0.5);
-        let p90 = digest.estimate_quantile(0.9);
-        let p99 = digest.estimate_quantile(0.99);
-
-        let mut table = Table::new();
-
-        table.add_row(Row::new(vec![
-            Cell::new("Measurement"),
-            // Cell::New("Avg"),
-            Cell::new("Median"),
-            Cell::new("p90"),
-            Cell::new("p99"),
-        ]));
-
-        table.add_row(Row::new(vec![
-           Cell::new("Latency (s)"),
-            Cell::new(&median.to_string()),
-           Cell::new(&p90.to_string()),
-           Cell::new(&p99.to_string()),
-        ]));
-
-        table.printstd();
+        print_digest(digest);
 
     }).unwrap();
 }
 
 fn send_request(id:i64, finish: crossbeam_channel::Sender<i64>) {
-    sleep(std::time::Duration::from_secs(id as u64 + 1));
+    sleep(Duration::from_millis(500));
     finish.send(id).unwrap();
+}
+
+
+fn print_digest(digest: TDigest) {
+    let median = digest.estimate_quantile(0.5);
+    let p90 = digest.estimate_quantile(0.9);
+    let p99 = digest.estimate_quantile(0.99);
+
+    let mut table = Table::new();
+
+    println!("\nResults:");
+
+    table.add_row(Row::new(vec![
+        Cell::new("Measurement"),
+        // Cell::New("Avg"),
+        Cell::new("Median"),
+        Cell::new("p90"),
+        Cell::new("p99"),
+    ]));
+
+    table.add_row(Row::new(vec![
+        Cell::new("Latency (s)"),
+        Cell::new(&median.to_string()),
+        Cell::new(&p90.to_string()),
+        Cell::new(&p99.to_string()),
+    ]));
+
+    table.printstd();
 }

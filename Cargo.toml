@@ -8,3 +8,5 @@ edition = "2021"
 [dependencies]
 crossbeam-channel = "0.5.12"
 crossbeam = "0.8.4"
+clap = { version = "4.5.2", features = ["derive"] }
+tdigest = "0.1.1"

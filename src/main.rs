@@ -1,11 +1,10 @@
 mod types;
 
-use std::io;
-use std::io::Write;
 use std::thread::{sleep};
 use std::time::Duration;
 use clap::Parser;
 use crossbeam_channel::bounded;
+use indicatif::ProgressBar;
 use tdigest::TDigest;
 use prettytable::{Table, Row, Cell};
 
@@ -32,18 +31,21 @@ fn main() {
         // Sink
         let mut digest = TDigest::new_with_size(100);
 
-        let mut count = 0;
+        let bar = ProgressBar::new(parameters.requests as u64);
 
-        print!("Running");
+        let step = parameters.requests / 10;
+
+        let mut count = 0;
 
         for msg in finished.iter() {
             digest = digest.merge_unsorted(vec![msg as f64]);
             count+=1;
-            if count % (parameters.requests / 10) == 0 {
-                io::stdout().flush().expect("");
-                print!(".");
+            if count % step == 0 {
+                bar.inc(step as u64);
             }
         }
+
+        bar.finish_with_message("Finished.");
 
         print_digest(digest);
 
@@ -63,11 +65,8 @@ fn print_digest(digest: TDigest) {
 
     let mut table = Table::new();
 
-    println!("\nResults:");
-
     table.add_row(Row::new(vec![
         Cell::new("Measurement"),
-        // Cell::New("Avg"),
         Cell::new("Median"),
         Cell::new("p90"),
         Cell::new("p99"),

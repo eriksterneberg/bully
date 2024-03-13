@@ -1,18 +1,19 @@
 mod types;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use clap::Parser;
 use futures::future::{join_all};
 use tdigest::TDigest;
 use prettytable::{Table, Row, Cell};
-use crate::types::{HttpStatusCounter, Parameters};
+use crate::types::{ConnectionPool, HttpStatusCounter, Parameters};
 use async_std::channel::{bounded, Receiver, Sender};
+use async_std::sync::Mutex;
 use async_std::task;
 use indicatif::{ProgressBar, ProgressStyle};
 use surf::Client;
 
-async fn worker(receiver: Receiver<bool>, sender: Sender<(Duration, surf::StatusCode)>) {
-    let client = Client::new();
+async fn worker(client: Client, receiver: Receiver<bool>, sender: Sender<(Duration, surf::StatusCode)>) {
 
     while receiver.recv().await.is_ok() {
 
@@ -26,7 +27,6 @@ async fn worker(receiver: Receiver<bool>, sender: Sender<(Duration, surf::Status
             }
             Err(e) => {
                 println!("Error: {}", e);
-                // panic!("Alas, we could not continue");
             }
         }
     }
@@ -44,8 +44,13 @@ async fn main_() {
 
     let mut tasks = Vec::with_capacity(parameters.concurrency);
 
+
+    // let connection_pool = Arc::new(Mutex::new(ConnectionPool::new(10)));
+
+    let client = Client::new();
+
     for _ in 0..parameters.concurrency {
-        tasks.push(task::spawn(worker(jobs.clone(), report.clone())));
+        tasks.push(task::spawn(worker(client.clone(), jobs.clone(), report.clone())));
     }
 
     drop(enqueue);

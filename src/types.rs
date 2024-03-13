@@ -5,8 +5,11 @@ use clap::Parser;
 #[derive(Clone, Parser)]
 pub struct Parameters {
     #[arg(short = 'r', long = "requests", default_value = "100")]
-    pub requests: i64,
+    pub requests: usize,
 
     #[arg(short = 'c', long = "concurrency", default_value = "10")]
-    pub concurrency: i64,
+    pub concurrency: usize,
+
+    #[arg(short = 'p', long = "precision", default_value = "7")]
+    pub precision: usize,
 }

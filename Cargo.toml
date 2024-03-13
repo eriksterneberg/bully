@@ -9,7 +9,10 @@ edition = "2021"
 crossbeam-channel = "0.5.12"
 crossbeam = "0.8.4"
 clap = { version = "4.5.2", features = ["derive"] }
-tdigest = "0.1.1"
+tdigest = "0.2.3"
 indicatif = "0.17.8"
 prettytable = "0.10.0"
-
+async-std = "1.12.0"
+futures = "0.3"
+tokio = { version = "1.36.0", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+surf = "2.3.2"

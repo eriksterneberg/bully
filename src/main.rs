@@ -5,31 +5,30 @@ use clap::Parser;
 use futures::future::{join_all};
 use tdigest::TDigest;
 use prettytable::{Table, Row, Cell};
-use crate::types::Parameters;
+use crate::types::{HttpStatusCounter, Parameters};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task;
 use indicatif::{ProgressBar, ProgressStyle};
 use surf::Client;
 
-async fn worker(receiver: Receiver<bool>, sender: Sender<Duration>) {
+async fn worker(receiver: Receiver<bool>, sender: Sender<(Duration, surf::StatusCode)>) {
     let client = Client::new();
 
     while receiver.recv().await.is_ok() {
 
-        let start_time = Instant::now();
+        let t1 = Instant::now();
         let response = client.get("http://localhost:8000/echo").await;
-        let end_time = Instant::now();
+        let t2 = Instant::now();
 
         match response {
-            Ok(_) => {
-                // println!("Response: {}", response.status());
+            Ok(response) => {
+                sender.send((t2 - t1, response.status())).await.expect("Failed to send report");                // println!("Response: {}", response.status());
             }
-            Err(_) => {
-                // println!("Error: {}", e);
+            Err(e) => {
+                println!("Error: {}", e);
+                // panic!("Alas, we could not continue");
             }
         }
-
-        sender.send(end_time - start_time).await.expect("Failed to send report");
     }
 }
 
@@ -62,9 +61,19 @@ fn main() {
     task::block_on(main_());
 }
 
-async fn summarise(parameters: Parameters, report: Receiver<Duration>) {
+/// Summarise the results of the benchmark
+///
+/// # Arguments
+///   * `parameters` - The parameters used to run the program
+///     * `report` - The channel to receive the results
+async fn summarise(parameters: Parameters, report: Receiver<(Duration, surf::StatusCode)>) {
+
+    // Todo: switch out TDigest for a library that supports incremental updates
     let digest = TDigest::new_with_size(100);
-    let mut values = vec![];
+    let mut values = Vec::with_capacity(parameters.requests);
+
+    let mut status_counter = HttpStatusCounter::new();
+
     let bar = ProgressBar::new(parameters.requests as u64);
     bar.set_style(ProgressStyle::default_bar()
         .template("{spinner:.red} [{elapsed_precise}] [{bar:40.red/pink}] {percent}% {msg}").unwrap());
@@ -72,17 +81,23 @@ async fn summarise(parameters: Parameters, report: Receiver<Duration>) {
     let mut count = 0;
 
     while let Ok(value) = report.recv().await {
-        values.push(duration_to_f64(value));
+        values.push(duration_to_f64(value.0));
+        status_counter.increment(value.1);
         count+=1;
         if count % step == 0 {
             bar.inc(step as u64);
         }
     }
 
-    print_digest(parameters, digest.merge_unsorted(values))
+    print_digest(parameters, digest.merge_unsorted(values), status_counter);
 }
 
-fn print_digest(param: Parameters, digest: TDigest) {
+/// Print the summary statistics of a TDigest
+///
+/// # Arguments
+///    * `param` - The parameters used to run the program
+///   * `digest` - The TDigest to summarise
+fn print_digest(param: Parameters, digest: TDigest, http_status_counter: HttpStatusCounter) {
     let avg = format!("{:.precision$}", digest.mean(), precision = param.precision);
     let median = format!("{:.precision$}", digest.estimate_quantile(0.50), precision = param.precision);
     let p80 = format!("{:.precision$}", digest.estimate_quantile(0.80), precision = param.precision);
@@ -109,8 +124,20 @@ fn print_digest(param: Parameters, digest: TDigest) {
     ]));
 
     table.printstd();
+
+    println!("HTTP Status Codes:");
+    for (status, count) in http_status_counter.counter.iter() {
+        println!("  * {}: {}", status, count);
+    }
 }
 
+/// Convert a duration to a floating point number of seconds
+///
+/// # Arguments
+///     * `duration` - The duration to convert
+///
+/// # Returns
+///    * A floating point number of seconds
 fn duration_to_f64(duration: Duration) -> f64 {
     // Convert duration to seconds as f64
     let seconds = duration.as_secs() as f64;

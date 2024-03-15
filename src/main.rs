@@ -1,42 +1,55 @@
 mod types;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use clap::Parser;
 use futures::future::{join_all};
 use tdigest::TDigest;
 use prettytable::{Table, Row, Cell};
-use crate::types::{ConnectionPool, HttpStatusCounter, Parameters};
+use crate::types::{HttpStatusCounter, Parameters};
 use async_std::channel::{bounded, Receiver, Sender};
-use async_std::sync::Mutex;
 use async_std::task;
+use async_std::task::sleep;
 use indicatif::{ProgressBar, ProgressStyle};
-use surf::Client;
+use isahc::HttpClient;
 
-async fn worker(client: Client, receiver: Receiver<bool>, sender: Sender<(Duration, surf::StatusCode)>) {
+async fn worker(duration: Duration, client: HttpClient, receiver: Receiver<bool>, sender: Sender<(Duration, u16)>) {
+
+    // Slowly ramp up the number of concurrent requests
+    sleep(duration).await;
 
     while receiver.recv().await.is_ok() {
 
         let t1 = Instant::now();
-        let response = client.get("http://localhost:8000/echo").await;
-        let t2 = Instant::now();
+        for i in 1..10 {
+            let response = client.get_async("http://localhost:8000/echo").await;
 
-        match response {
-            Ok(response) => {
-                sender.send((t2 - t1, response.status())).await.expect("Failed to send report");                // println!("Response: {}", response.status());
-            }
-            Err(e) => {
-                println!("Error: {}", e);
+            match response {
+                Ok(mut response) => {
+                    println!("Request successful on attempt {}", i);
+                    let t2 = Instant::now();
+                    // let body = response.body_string().await.expect("Failed to read response body");
+                    // println!("Request successful: {}", body);
+                    sender.send((t2 - t1, response.status().as_u16())).await.expect("Failed to send report");
+                    break;
+                }
+                Err(e) => {
+                    sleep(Duration::from_millis(1000) * i).await;
+                    if i == 9 {
+                        println!("Error: {}. Maybe you ramped up too quickly?", e);
+                        let t2 = Instant::now();
+                        sender.send((t2 - t1, 500)).await.expect("Failed to send report");
+                    }
+                }
             }
         }
     }
 }
 
-async fn main_() {
+async fn main_() -> Result<(), isahc::Error> {
     let parameters = types::Parameters::parse();
 
     let (enqueue, jobs) = bounded(parameters.requests);
-    let (report, results) = bounded(parameters.requests); // Bounded channel with capacity 1 to avoid unnecessary memory usage
+    let (report, results) = bounded(parameters.requests);
 
     for _ in 0..parameters.requests {
         enqueue.send(true).await.unwrap();
@@ -44,13 +57,10 @@ async fn main_() {
 
     let mut tasks = Vec::with_capacity(parameters.concurrency);
 
+    let client = HttpClient::new()?;
 
-    // let connection_pool = Arc::new(Mutex::new(ConnectionPool::new(10)));
-
-    let client = Client::new();
-
-    for _ in 0..parameters.concurrency {
-        tasks.push(task::spawn(worker(client.clone(), jobs.clone(), report.clone())));
+    for delay in 0..parameters.concurrency {
+        tasks.push(task::spawn(worker(Duration::from_millis(delay as u64), client.clone(), jobs.clone(), report.clone())));
     }
 
     drop(enqueue);
@@ -59,10 +69,13 @@ async fn main_() {
     tasks.push(task::spawn(summarise(parameters, results)));
 
     join_all(tasks).await;
+
+    Ok(())
 }
 
 
 fn main() {
+    env_logger::init();
     task::block_on(main_());
 }
 
@@ -71,7 +84,7 @@ fn main() {
 /// # Arguments
 ///   * `parameters` - The parameters used to run the program
 ///     * `report` - The channel to receive the results
-async fn summarise(parameters: Parameters, report: Receiver<(Duration, surf::StatusCode)>) {
+async fn summarise(parameters: Parameters, report: Receiver<(Duration, u16)>) {
 
     // Todo: switch out TDigest for a library that supports incremental updates
     let digest = TDigest::new_with_size(100);
@@ -79,11 +92,13 @@ async fn summarise(parameters: Parameters, report: Receiver<(Duration, surf::Sta
 
     let mut status_counter = HttpStatusCounter::new();
 
-    let bar = ProgressBar::new(parameters.requests as u64);
+    let bar = ProgressBar::new(parameters.requests as u64 - 1);
     bar.set_style(ProgressStyle::default_bar()
         .template("{spinner:.red} [{elapsed_precise}] [{bar:40.red/pink}] {percent}% {msg}").unwrap());
     let step = parameters.requests / 10;
     let mut count = 0;
+
+    bar.inc(step as u64);
 
     while let Ok(value) = report.recv().await {
         values.push(duration_to_f64(value.0));

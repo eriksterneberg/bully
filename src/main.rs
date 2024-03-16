@@ -1,10 +1,11 @@
 mod types;
+mod summary;
+mod duration;
 
 use std::time::{Duration, Instant};
 use clap::Parser;
 use futures::future::{join_all};
 use tdigest::TDigest;
-use prettytable::{Table, Row, Cell};
 use crate::types::{HttpStatusCounter, Parameters, Results};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task;
@@ -14,6 +15,8 @@ use isahc::{
     prelude::*,
     HttpClient,
 };
+use crate::duration::DurationToF64;
+use crate::summary::{print_digest};
 use crate::types::Results::{Died, RequestDetails, Started, Stopped};
 
 async fn worker(duration: Duration, client: HttpClient, receiver: Receiver<bool>, sender: Sender<Results>) {
@@ -116,7 +119,7 @@ async fn summarise(parameters: Parameters, report: Receiver<Results>) {
     while let Ok(value) = report.recv().await {
         match value {
             RequestDetails { status_code, latency } => {
-                values.push(duration_to_f64(latency));
+                values.push(latency.to_f64());
                 status_counter.increment(status_code);
 
                 count+=1;
@@ -163,56 +166,3 @@ async fn summarise(parameters: Parameters, report: Receiver<Results>) {
     print_digest(parameters, digest.merge_unsorted(values), status_counter);
 }
 
-/// Print the summary statistics of a TDigest
-///
-/// # Arguments
-///    * `param` - The parameters used to run the program
-///   * `digest` - The TDigest to summarise
-fn print_digest(param: Parameters, digest: TDigest, http_status_counter: HttpStatusCounter) {
-    let avg = format!("{:.precision$}", digest.mean(), precision = param.precision);
-    let median = format!("{:.precision$}", digest.estimate_quantile(0.50), precision = param.precision);
-    let p80 = format!("{:.precision$}", digest.estimate_quantile(0.80), precision = param.precision);
-    let p90 = format!("{:.precision$}", digest.estimate_quantile(0.90), precision = param.precision);
-    let p99 = format!("{:.precision$}", digest.estimate_quantile(0.99), precision = param.precision);
-    let mut table = Table::new();
-
-    table.add_row(Row::new(vec![
-        Cell::new("Measurement"),
-        Cell::new("Average"),
-        Cell::new("Median"),
-        Cell::new("p80"),
-        Cell::new("p90"),
-        Cell::new("p99"),
-    ]));
-
-    table.add_row(Row::new(vec![
-        Cell::new("Latency (s)"),
-        Cell::new(&avg),
-        Cell::new(&median),
-        Cell::new(&p80),
-        Cell::new(&p90),
-        Cell::new(&p99),
-    ]));
-
-    table.printstd();
-
-    println!("HTTP Status Codes:");
-    for (status, count) in http_status_counter.counter.iter() {
-        println!("  * {}: {}", status, count);
-    }
-}
-
-/// Convert a duration to a floating point number of seconds
-///
-/// # Arguments
-///     * `duration` - The duration to convert
-///
-/// # Returns
-///    * A floating point number of seconds
-fn duration_to_f64(duration: Duration) -> f64 {
-    // Convert duration to seconds as f64
-    let seconds = duration.as_secs() as f64;
-    // Convert nanoseconds to seconds and add to the total
-    let nanos = duration.subsec_nanos() as f64 / 1_000_000_000.0;
-    seconds + nanos
-}

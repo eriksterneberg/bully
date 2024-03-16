@@ -5,44 +5,49 @@ use clap::Parser;
 use futures::future::{join_all};
 use tdigest::TDigest;
 use prettytable::{Table, Row, Cell};
-use crate::types::{HttpStatusCounter, Parameters};
+use crate::types::{HttpStatusCounter, Parameters, Results};
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::task;
 use async_std::task::sleep;
 use indicatif::{ProgressBar, ProgressStyle};
-use isahc::HttpClient;
+use isahc::{
+    prelude::*,
+    HttpClient,
+};
+use crate::types::Results::{Died, RequestDetails, Started, Stopped};
 
-async fn worker(duration: Duration, client: HttpClient, receiver: Receiver<bool>, sender: Sender<(Duration, u16)>) {
-
-    // Slowly ramp up the number of concurrent requests
-    sleep(duration).await;
+async fn worker(duration: Duration, client: HttpClient, receiver: Receiver<bool>, sender: Sender<Results>) {
+    let mut slept = false;
 
     while receiver.recv().await.is_ok() {
+        if !slept {
+            // Slowly ramp up the number of concurrent requests
+            sender.send(Started).await.expect("Failed to send report");
+            sleep(duration).await;
+            slept = true;
+        }
 
         let t1 = Instant::now();
-        for i in 1..10 {
-            let response = client.get_async("http://localhost:8000/echo").await;
+        let response = client.get_async("http://localhost:8000/echo").await;
+        let t2 = Instant::now();
 
-            match response {
-                Ok(mut response) => {
-                    println!("Request successful on attempt {}", i);
-                    let t2 = Instant::now();
-                    // let body = response.body_string().await.expect("Failed to read response body");
-                    // println!("Request successful: {}", body);
-                    sender.send((t2 - t1, response.status().as_u16())).await.expect("Failed to send report");
-                    break;
-                }
-                Err(e) => {
-                    sleep(Duration::from_millis(1000) * i).await;
-                    if i == 9 {
-                        println!("Error: {}. Maybe you ramped up too quickly?", e);
-                        let t2 = Instant::now();
-                        sender.send((t2 - t1, 500)).await.expect("Failed to send report");
-                    }
-                }
+        match response {
+            Ok(mut response) => {
+                let results = RequestDetails {
+                    status_code: response.status().as_u16(),
+                    latency: t2 - t1,
+                };
+                sender.send(results).await.expect("Failed to send report");
+                let _ = response.consume().await;
+            }
+            Err(_) => {
+                sender.send(Died).await.expect("Failed to send report");
+                return;
             }
         }
     }
+
+    sender.send(Stopped).await.expect("Failed to send report");
 }
 
 async fn main_() -> Result<(), isahc::Error> {
@@ -51,22 +56,27 @@ async fn main_() -> Result<(), isahc::Error> {
     let (enqueue, jobs) = bounded(parameters.requests);
     let (report, results) = bounded(parameters.requests);
 
+    let mut tasks = Vec::with_capacity(parameters.concurrency);
+    tasks.push(task::spawn(summarise(parameters.clone(), results)));
+
     for _ in 0..parameters.requests {
         enqueue.send(true).await.unwrap();
     }
 
-    let mut tasks = Vec::with_capacity(parameters.concurrency);
-
     let client = HttpClient::new()?;
 
-    for delay in 0..parameters.concurrency {
-        tasks.push(task::spawn(worker(Duration::from_millis(delay as u64), client.clone(), jobs.clone(), report.clone())));
+    let mut start = 100;
+
+    for i in 0..parameters.concurrency {
+        if i % 50 == 0 {
+            start += 200;
+        }
+
+        tasks.push(task::spawn(worker(Duration::from_millis(start as u64), client.clone(), jobs.clone(), report.clone())));
     }
 
     drop(enqueue);
     drop(report);
-
-    tasks.push(task::spawn(summarise(parameters, results)));
 
     join_all(tasks).await;
 
@@ -76,7 +86,7 @@ async fn main_() -> Result<(), isahc::Error> {
 
 fn main() {
     env_logger::init();
-    task::block_on(main_());
+    let _ = task::block_on(main_());
 }
 
 /// Summarise the results of the benchmark
@@ -84,9 +94,7 @@ fn main() {
 /// # Arguments
 ///   * `parameters` - The parameters used to run the program
 ///     * `report` - The channel to receive the results
-async fn summarise(parameters: Parameters, report: Receiver<(Duration, u16)>) {
-
-    // Todo: switch out TDigest for a library that supports incremental updates
+async fn summarise(parameters: Parameters, report: Receiver<Results>) {
     let digest = TDigest::new_with_size(100);
     let mut values = Vec::with_capacity(parameters.requests);
 
@@ -99,15 +107,58 @@ async fn summarise(parameters: Parameters, report: Receiver<(Duration, u16)>) {
     let mut count = 0;
 
     bar.inc(step as u64);
+    let mut alive_workers: u32 = 0;
+    let mut finished_workers: u32 = 0;
+    let mut dead_workers: u32 = 0;
+    let mut max_alive_workers: u32 = 0;
+    bar.set_message(format!("Alive workers: {}; finished workers: {}; dead workers: {}", alive_workers, finished_workers, dead_workers));
 
     while let Ok(value) = report.recv().await {
-        values.push(duration_to_f64(value.0));
-        status_counter.increment(value.1);
-        count+=1;
-        if count % step == 0 {
-            bar.inc(step as u64);
+        match value {
+            RequestDetails { status_code, latency } => {
+                values.push(duration_to_f64(latency));
+                status_counter.increment(status_code);
+
+                count+=1;
+
+                if count % step == 0 {
+                    bar.inc(step as u64);
+                }
+            }
+            Started => {
+                alive_workers += 1;
+            }
+            Died => {
+                alive_workers -= 1;
+                dead_workers += 1;
+            }
+            Stopped => {
+                finished_workers += 1;
+                alive_workers -= 1;
+            }
         }
+
+        if alive_workers > max_alive_workers {
+            max_alive_workers = alive_workers;
+        }
+
+        bar.set_message(format!("Working: alive workers: {}; finished workers: {}; dead workers: {}", alive_workers, finished_workers, dead_workers));
     }
+
+    sleep(Duration::from_millis(1000)).await;
+
+    bar.set_message(format!("Done! alive workers: {}; finished workers: {}; dead workers: {}", alive_workers, finished_workers, dead_workers));
+
+    if max_alive_workers < parameters.concurrency as u32 {
+        println!("Max alive workers: {}; expected: {}.", max_alive_workers, parameters.concurrency);
+        println!("By running the program with export RUST_LOG=warn or lower, you can see the log messages for the workers that died.");
+        println!("This can help you determine the cause of death. For instance, this error message might indicate that the number of file descriptors available is too low:");
+        println!("    request completed with error: failed to connect to the server");
+        println!();
+        println!("If you see this error, try raising the ulimit.");
+        println!("If you see a different error, please open an issue on the GitHub repository.");
+        println!();
+    };
 
     print_digest(parameters, digest.merge_unsorted(values), status_counter);
 }

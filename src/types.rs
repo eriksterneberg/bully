@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::time::Duration;
+use async_std::task::{Task, TaskId};
 use clap::Parser;
 
 
@@ -14,6 +16,17 @@ pub struct Parameters {
 
     #[arg(short = 'p', long = "precision", default_value = "7")]
     pub precision: usize,
+}
+
+#[derive(Debug)]
+pub enum Results {
+    Started,
+    Stopped,
+    Died,
+    RequestDetails{
+        status_code: u16,
+        latency: Duration,
+    }
 }
 
 

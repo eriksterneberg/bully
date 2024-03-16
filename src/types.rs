@@ -15,6 +15,9 @@ pub struct Parameters {
 
     #[arg(short = 'p', long = "precision", default_value = "7")]
     pub precision: usize,
+
+    #[arg(short = 't', long = "path")]
+    pub path: String,
 }
 
 #[derive(Debug)]
@@ -43,9 +46,5 @@ impl HttpStatusCounter {
     pub fn increment(&mut self, status_code: u16) {
         let count = self.counter.entry(status_code).or_insert(0);
         *count += 1;
-    }
-
-    pub fn get_count(&self, status_code: u16) -> Option<&u64> {
-        self.counter.get(&status_code)
     }
 }

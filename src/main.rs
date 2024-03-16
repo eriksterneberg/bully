@@ -19,7 +19,7 @@ use crate::duration::DurationToF64;
 use crate::summary::{print_digest};
 use crate::types::Results::{Died, RequestDetails, Started, Stopped};
 
-async fn worker(duration: Duration, client: HttpClient, receiver: Receiver<bool>, sender: Sender<Results>) {
+async fn worker(path: String, duration: Duration, client: HttpClient, receiver: Receiver<bool>, sender: Sender<Results>) {
     let mut slept = false;
 
     while receiver.recv().await.is_ok() {
@@ -31,7 +31,7 @@ async fn worker(duration: Duration, client: HttpClient, receiver: Receiver<bool>
         }
 
         let t1 = Instant::now();
-        let response = client.get_async("http://localhost:8000/echo").await;
+        let response = client.get_async(&path).await;
         let t2 = Instant::now();
 
         match response {
@@ -75,7 +75,7 @@ async fn main_() -> Result<(), isahc::Error> {
             start += 200;
         }
 
-        tasks.push(task::spawn(worker(Duration::from_millis(start as u64), client.clone(), jobs.clone(), report.clone())));
+        tasks.push(task::spawn(worker(parameters.path.clone(), Duration::from_millis(start as u64), client.clone(), jobs.clone(), report.clone())));
     }
 
     drop(enqueue);
